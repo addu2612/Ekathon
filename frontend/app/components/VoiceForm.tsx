@@ -2,37 +2,36 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-type TriageResult = {
-  language: "hindi" | "marathi" | "english" | "unknown";
-  summary: string;
-  urgency: "LOW" | "MEDIUM" | "HIGH" | "UNKNOWN";
-  facility: string;
-  next_step: string;
-  follow_up_question?: string;
+type SpeechRecognitionEventLike = {
+  resultIndex: number;
+  results: ArrayLike<ArrayLike<{ transcript: string }>>;
+};
+
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  onstart: (() => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
 };
 
 type Recognition = typeof window extends {
   webkitSpeechRecognition: infer T;
 }
   ? T
-  : SpeechRecognition;
+  : SpeechRecognitionLike;
 
 type RecognitionCtor = new () => Recognition;
 
-const urgencyLabels: Record<TriageResult["urgency"], string> = {
-  LOW: "LOW",
-  MEDIUM: "MEDIUM",
-  HIGH: "HIGH",
-  UNKNOWN: "UNKNOWN",
-};
-
-const defaultResult: TriageResult = {
-  language: "unknown",
-  summary: "",
-  urgency: "UNKNOWN",
-  facility: "",
-  next_step: "",
-  follow_up_question: undefined,
+type VoiceFormProps = {
+  followUpPrompt: string | null;
+  isLoading: boolean;
+  onSubmit: (payload: { text: string; followUp?: string | null }) => Promise<void>;
+  setStatus: (value: string) => void;
+  setError: (value: string) => void;
 };
 
 function getRecognizer(): RecognitionCtor | null {
@@ -46,39 +45,25 @@ function getRecognizer(): RecognitionCtor | null {
   return anyWindow.SpeechRecognition ?? anyWindow.webkitSpeechRecognition ?? null;
 }
 
-function safeParseJSON(text: string): TriageResult | null {
-  try {
-    return JSON.parse(text) as TriageResult;
-  } catch {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return null;
-    try {
-      return JSON.parse(match[0]) as TriageResult;
-    } catch {
-      return null;
-    }
-  }
-}
-
-export default function VoiceForm() {
+export default function VoiceForm({
+  followUpPrompt,
+  isLoading,
+  onSubmit,
+  setStatus,
+  setError,
+}: VoiceFormProps) {
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState("");
-  const [result, setResult] = useState<TriageResult>(defaultResult);
-  const [status, setStatus] = useState("Ready to listen.");
-  const [error, setError] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [followUpPrompt, setFollowUpPrompt] = useState<string | null>(null);
   const recognitionRef = useRef<Recognition | null>(null);
   const transcriptRef = useRef("");
-  const apiBase = (process.env.NEXT_PUBLIC_API_BASE ?? "").replace(/\/$/, "");
 
   const hasSpeechSupport = useMemo(() => !!getRecognizer(), []);
 
   useEffect(() => {
     if (!hasSpeechSupport) {
-      setStatus("Voice input is not supported on this device.");
+      setStatus("Voice input is not supported on this device. Type your symptoms below.");
     }
-  }, [hasSpeechSupport]);
+  }, [hasSpeechSupport, setStatus]);
 
   const stopListening = () => {
     recognitionRef.current?.stop();
@@ -86,9 +71,15 @@ export default function VoiceForm() {
   };
 
   const startListening = () => {
-    if (!hasSpeechSupport) return;
+    if (!hasSpeechSupport) {
+      setError("Speech recognition is unavailable. Please type your symptoms.");
+      return;
+    }
     const Recognizer = getRecognizer();
-    if (!Recognizer) return;
+    if (!Recognizer) {
+      setError("Speech recognition is unavailable. Please type your symptoms.");
+      return;
+    }
 
     const recognition = new Recognizer();
     recognition.interimResults = true;
@@ -119,54 +110,12 @@ export default function VoiceForm() {
       setIsListening(false);
       setStatus("Recording stopped.");
       if (transcriptRef.current) {
-        submitTranscript({ text: transcriptRef.current, followUp: followUpPrompt });
+        onSubmit({ text: transcriptRef.current, followUp: followUpPrompt });
       }
     };
 
     recognitionRef.current = recognition;
     recognition.start();
-  };
-
-  const submitTranscript = async (payload: {
-    text: string;
-    followUp?: string | null;
-  }) => {
-    if (!payload.text) {
-      setError("Please speak your symptoms first.");
-      return;
-    }
-    setIsLoading(true);
-    setStatus("Processing your request...");
-    setError("");
-
-    try {
-      const response = await fetch(`${apiBase}/api/triage`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        throw new Error("Request failed");
-      }
-
-      const data = await response.json();
-      const parsed = safeParseJSON(data?.result ?? "");
-      if (!parsed) {
-        throw new Error("Invalid response format");
-      }
-
-      setResult(parsed);
-      setFollowUpPrompt(parsed.follow_up_question ?? null);
-      setStatus("Guidance ready.");
-    } catch (err) {
-      setError("We could not process that. Please try again.");
-      setStatus("Ready to listen.");
-    } finally {
-      setIsLoading(false);
-    }
   };
 
   const onPrimaryClick = () => {
@@ -177,32 +126,18 @@ export default function VoiceForm() {
     startListening();
   };
 
-  const primaryLabel = isListening ? "Stop recording" : "Press and speak";
+  const primaryLabel = isListening ? "Stop recording" : "Speak now";
 
   return (
     <div className="panel">
-      <div className="status info">{status}</div>
-      <button className="primary-action" onClick={onPrimaryClick} disabled={!hasSpeechSupport || isLoading}>
+      <div className="panel-header">
+        <h3>Voice triage</h3>
+        <span className="hint">Hindi, Marathi, or English</span>
+      </div>
+      <button className="primary-action" onClick={onPrimaryClick} disabled={isLoading}>
         {primaryLabel}
       </button>
-      {followUpPrompt ? (
-        <div className="status info">
-          {followUpPrompt}
-        </div>
-      ) : null}
-      {transcript ? (
-        <div className="status good">Heard: {transcript}</div>
-      ) : null}
-      {error ? <div className="status info">{error}</div> : null}
-      {result.summary ? (
-        <div className="result">
-          <h2>Guidance</h2>
-          <p><span className="badge">Care urgency: {urgencyLabels[result.urgency]}</span></p>
-          <p><strong>Summary:</strong> {result.summary}</p>
-          <p><strong>Facility:</strong> {result.facility}</p>
-          <p><strong>Next step:</strong> {result.next_step}</p>
-        </div>
-      ) : null}
+      {transcript ? <div className="status good">Heard: {transcript}</div> : null}
     </div>
   );
 }
